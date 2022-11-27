@@ -2,77 +2,55 @@ from emnist import *
 import math
 import numpy as np
 
-# https://stackoverflow.com/questions/8554282/creating-a-png-file-in-python
-import zlib
-import struct
 
-def makeGrayPNG(data, height = None, width = None):
-    def I1(value):
-        return struct.pack("!B", value & (2**8-1))
-    def I4(value):
-        return struct.pack("!I", value & (2**32-1))
-    # compute width&height from data if not explicit
-    if height is None:
-        height = len(data) # rows
-    if width is None:
-        width = 0
-        for row in data:
-            if width < len(row):
-                width = len(row)
-    # generate these chunks depending on image type
-    makeIHDR = True
-    makeIDAT = True
-    makeIEND = True
-    png = b"\x89" + "PNG\r\n\x1A\n".encode('ascii')
-    if makeIHDR:
-        colortype = 0 # true gray image (no palette)
-        bitdepth = 8 # with one byte per pixel (0..255)
-        compression = 0 # zlib (no choice here)
-        filtertype = 0 # adaptive (each scanline seperately)
-        interlaced = 0 # no
-        IHDR = I4(width) + I4(height) + I1(bitdepth)
-        IHDR += I1(colortype) + I1(compression)
-        IHDR += I1(filtertype) + I1(interlaced)
-        block = "IHDR".encode('ascii') + IHDR
-        png += I4(len(IHDR)) + block + I4(zlib.crc32(block))
-    if makeIDAT:
-        raw = b""
-        for y in range(height):
-            raw += b"\0" # no filter for this scanline
-            for x in range(width):
-                c = b"\0" # default black pixel
-                if y < len(data) and x < len(data[y]):
-                    c = I1(data[y][x])
-                raw += c
-        compressor = zlib.compressobj()
-        compressed = compressor.compress(raw)
-        compressed += compressor.flush() #!!
-        block = "IDAT".encode('ascii') + compressed
-        png += I4(len(compressed)) + block + I4(zlib.crc32(block))
-    if makeIEND:
-        block = "IEND".encode('ascii')
-        png += I4(0) + block + I4(zlib.crc32(block))
-    return png
+def sigma(x):
+    if x > 100:
+        return 1
+    elif x < -100:
+        return 0
+    else:
+        return 1 / (1 + math.exp(-x))
 
 
-images, labels = extract_training_samples('letters')
+def dsigma(x):
+    if abs(x) > 100:
+        return 0
+    return sigma(x) * (1 - sigma(x))
 
-# with open('output.png', 'wb') as fh:
-#     fh.write(makeGrayPNG(images[0]))
 
-shape = [784] + [20] * 2 + [26]
+images, labels = extract_training_samples('digits')
+
+shape = [784] + [20] * 2 + [10]
 num_levels = len(shape) - 1
+mult = .01
+train = 100000
 
-weights = [np.random.normal(size=(shape[i + 1], shape[i])) for i in range(num_levels)]
-biases = [np.zeros(shape[i + 1]) for i in range(num_levels)]
-sigma = lambda x: 1 / (1 + math.exp(-x))
-dsigma = lambda x: sigma(x) * (1 - sigma(x))
-sigmaVectorized = np.vectorize(sigma)
+weights = [np.random.normal(size=(shape[lvl + 1], shape[lvl])) for lvl in range(num_levels)]
+biases = [np.zeros(shape[lvl + 1]) for lvl in range(num_levels)]
+for n in range(train):
+    neurons = [np.vectorize(lambda x: x / 256)(images[n].flatten())]
+    for lvl in range(num_levels):
+        neurons.append(np.vectorize(sigma)(np.matmul(weights[lvl], neurons[lvl]) + biases[lvl]))
 
-def forward(arr):
-    for i in range(num_levels):
-        arr = sigmaVectorized(np.matmul(weights[i], arr) + biases[i])
-    return arr
+    expected = [1 if i == labels[n] - 1 else 0 for i in range(shape[-1])]
+    dE_da = 2 * (neurons[-1] - expected)
+    for lvl in range(num_levels, 0, -1):
+        for i in range(len(neurons[lvl])):
+            da_dw = dsigma(neurons[lvl][i]) * neurons[lvl - 1]
+            weights[lvl - 1][i] -= mult * dE_da[i] * da_dw
+        da_db = np.vectorize(dsigma)(neurons[lvl])
+        biases[lvl - 1] -= mult * dE_da * da_db
+        dE_da = np.matmul(np.transpose(weights[lvl - 1]), dE_da * np.vectorize(dsigma)(neurons[lvl]))
 
+    error = sum((neurons[-1] - expected) ** 2)
+    if n % 1000 == 0:
+        print(n, error)
 
-print(forward(np.zeros(784)))
+test = []
+for n in range(train, train + 10000):
+    neurons = [np.vectorize(lambda x: x / 256)(images[n].flatten())]
+    for lvl in range(num_levels):
+        neurons.append(np.vectorize(sigma)(np.matmul(weights[lvl], neurons[lvl]) + biases[lvl]))
+
+    test.append(np.argmax(neurons[-1]) == labels[n] - 1)
+print(sum(test), len(test))
